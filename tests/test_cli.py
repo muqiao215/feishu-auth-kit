@@ -13,3 +13,13 @@ def test_setup_output_contains_manual_open_platform_steps(capsys) -> None:
     assert "Open Platform" in captured.out
     assert "application:application:self_manage" in captured.out
     assert "offline_access" in captured.out
+
+
+def test_doctor_subcommand_accepts_credentials_after_command() -> None:
+    parser = cli.build_parser()
+
+    args = parser.parse_args(["doctor", "--app-id", "cli_xxx", "--app-secret", "secret"])
+
+    assert args.command == "doctor"
+    assert args.app_id == "cli_xxx"
+    assert args.app_secret == "secret"

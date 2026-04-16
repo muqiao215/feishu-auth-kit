@@ -3,7 +3,26 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 CORE_APP_SCOPES = [
+    "contact:contact.base:readonly",
+    "docx:document:readonly",
+    "im:chat:read",
+    "im:chat:update",
+    "im:message.group_at_msg:readonly",
+    "im:message.p2p_msg:readonly",
+    "im:message.pins:read",
+    "im:message.pins:write_only",
+    "im:message.reactions:read",
+    "im:message.reactions:write_only",
+    "im:message:readonly",
+    "im:message:recall",
+    "im:message:send_as_bot",
+    "im:message:send_multi_users",
+    "im:message:send_sys_msg",
+    "im:message:update",
+    "im:resource",
     "application:application:self_manage",
+    "cardkit:card:write",
+    "cardkit:card:read",
     "offline_access",
 ]
 
@@ -16,35 +35,53 @@ SENSITIVE_SCOPES = [
 
 INITIAL_SCOPE_CATALOG = {
     "application:application:self_manage": {
+        "group": "core_tenant",
         "token_types": ["tenant"],
         "description": "Inspect app metadata and granted scopes.",
     },
     "offline_access": {
+        "group": "oauth",
         "token_types": ["user"],
         "description": "Return refresh tokens for device-flow user auth.",
     },
     "im:message:readonly": {
-        "token_types": ["user", "tenant"],
-        "description": "Read message content.",
+        "group": "messaging",
+        "token_types": ["tenant", "user"],
+        "description": "Read message content and history.",
     },
     "im:message:send_as_bot": {
+        "group": "messaging",
         "token_types": ["tenant"],
         "description": "Send bot messages.",
     },
     "im:chat:read": {
+        "group": "messaging",
         "token_types": ["tenant"],
         "description": "Read chat metadata.",
     },
+    "cardkit:card:write": {
+        "group": "cards",
+        "token_types": ["tenant"],
+        "description": "Create and update message cards.",
+    },
+    "cardkit:card:read": {
+        "group": "cards",
+        "token_types": ["tenant"],
+        "description": "Read message card state.",
+    },
     "calendar:calendar:read": {
+        "group": "calendar",
         "token_types": ["user"],
         "description": "Read user calendars.",
     },
     "calendar:calendar.event:delete": {
+        "group": "calendar",
         "token_types": ["user"],
         "description": "Delete calendar events.",
         "sensitive": True,
     },
     "space:document:delete": {
+        "group": "drive",
         "token_types": ["user"],
         "description": "Delete cloud docs.",
         "sensitive": True,
@@ -88,4 +125,3 @@ def summarize_scope_batches(batches: Iterable[Iterable[str]]) -> list[str]:
 def missing_core_scopes(scopes: Iterable[str]) -> list[str]:
     granted = set(_dedupe_preserve_order(scopes))
     return [scope for scope in CORE_APP_SCOPES if scope not in granted]
-

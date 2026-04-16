@@ -102,6 +102,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         app_info = client.get_app_info(args.target_app_id)
     except FeishuApiError as exc:
         print(f"App info: FAILED ({exc})")
+        permission_url = client.build_permission_url(
+            client.app_id,
+            scopes=["application:application:self_manage"],
+        )
+        print(f"Grant application self-management: {permission_url}")
         return 1
 
     print(f"App info: OK ({app_info.app_id})")
@@ -134,6 +139,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 def cmd_scopes(args: argparse.Namespace) -> int:
     client = _require_client(args)
     scopes = client.get_granted_scopes(token_type=args.token_type or None)
+    print(f"Granted scopes: {len(scopes)}")
     for scope in scopes:
         print(scope)
     return 0
@@ -150,6 +156,8 @@ def cmd_login(args: argparse.Namespace) -> int:
     print(f"Verification URL: {auth.verification_uri}")
     print(f"Verification URL (complete): {auth.verification_uri_complete}")
     print(f"User code: {auth.user_code}")
+    print(f"Expires in: {auth.expires_in}s")
+    print(f"Poll interval: {auth.interval}s")
     print(f"Requested scopes: {' '.join(scopes)}")
     if args.no_poll:
         return 0

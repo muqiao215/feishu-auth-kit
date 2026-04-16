@@ -2,7 +2,8 @@
 .pytest_cache/
 .ruff_cache/
 __pycache__/
-*.py[cod]
+*.pyc
+*.pyo
 dist/
 build/
 *.egg-info/

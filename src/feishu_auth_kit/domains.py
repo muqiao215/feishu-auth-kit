@@ -8,7 +8,9 @@ from urllib.parse import urlparse
 class DomainSet:
     open_base: str
     accounts_base: str
+    applink_base: str
     www_base: str
+    mcp_base: str
 
     @property
     def tenant_token_url(self) -> str:
@@ -37,13 +39,17 @@ def resolve_domains(brand: str = "feishu") -> DomainSet:
         return DomainSet(
             open_base="https://open.feishu.cn",
             accounts_base="https://accounts.feishu.cn",
+            applink_base="https://applink.feishu.cn",
             www_base="https://www.feishu.cn",
+            mcp_base="https://mcp.feishu.cn",
         )
     if normalized == "lark":
         return DomainSet(
             open_base="https://open.larksuite.com",
             accounts_base="https://accounts.larksuite.com",
+            applink_base="https://applink.larksuite.com",
             www_base="https://www.larksuite.com",
+            mcp_base="https://mcp.larksuite.com",
         )
 
     open_base = _normalize_base(brand)
@@ -55,10 +61,23 @@ def resolve_domains(brand: str = "feishu") -> DomainSet:
     return DomainSet(
         open_base=open_base,
         accounts_base=accounts_base,
+        applink_base=open_base,
         www_base=open_base,
+        mcp_base=open_base,
     )
 
 
 def open_platform_domain(brand: str = "feishu") -> str:
     return resolve_domains(brand).open_base
 
+
+def applink_domain(brand: str = "feishu") -> str:
+    return resolve_domains(brand).applink_base
+
+
+def www_domain(brand: str = "feishu") -> str:
+    return resolve_domains(brand).www_base
+
+
+def mcp_domain(brand: str = "feishu") -> str:
+    return resolve_domains(brand).mcp_base
