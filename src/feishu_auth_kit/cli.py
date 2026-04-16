@@ -4,7 +4,9 @@ import argparse
 import json
 import os
 from collections.abc import Iterable
+from pathlib import Path
 
+from .app_registration import AppRegistrationClient, AppRegistrationPollResult
 from .claude_adapter import (
     build_claude_device_flow_payload,
     build_claude_permission_payload,
@@ -22,6 +24,7 @@ from .orchestration import (
     verify_access_token_identity,
 )
 from .owner_policy import OwnerPolicyMode, check_owner_policy
+from .probe import register_ai_agent
 from .runtime_cards import (
     CardAction,
     ContinuationState,
@@ -46,18 +49,19 @@ def format_setup_guide(brand: str = "feishu") -> str:
         [
             "Feishu / Lark app setup guide",
             "",
-            "This kit cannot create the app for you or bypass Open Platform review.",
-            "Use it after you have a self-built app and valid credentials.",
+            "This kit supports the official scan-to-create app registration flow.",
+            "It still does not bypass Open Platform approval, review, or publishing policy.",
             "",
             "Zero-start checklist:",
-            f"1. Open {platform} and create a self-built app.",
-            "2. Copy App ID and App Secret from the credentials page.",
-            "3. Enable core permissions:",
+            "1. Try `feishu-auth-kit register scan-create` for official QR onboarding.",
+            f"2. If scan-create is unavailable, open {platform} and create an app manually.",
+            "3. Copy App ID and App Secret from the credentials page.",
+            "4. Enable core permissions:",
             "   - application:application:self_manage",
             "   - offline_access",
-            "4. Add the user or tenant scopes your downstream tool actually needs.",
-            "5. Publish or release the app according to Feishu/Lark policy.",
-            "6. Run `feishu-auth-kit doctor --app-id ... --app-secret ...`.",
+            "5. Add the user or tenant scopes your downstream tool actually needs.",
+            "6. Publish or release the app according to Feishu/Lark policy.",
+            "7. Run `feishu-auth-kit doctor --app-id ... --app-secret ...`.",
             "",
             "This repository guides setup and automates validation and OAuth.",
         ]
@@ -121,9 +125,186 @@ def _pending_flow_store_from_args(args: argparse.Namespace) -> FilePendingFlowRe
     return FilePendingFlowRegistry(getattr(args, "pending_flow_store_path", None))
 
 
+def _registration_client_from_args(args: argparse.Namespace) -> AppRegistrationClient:
+    return AppRegistrationClient(brand=args.brand)
+
+
+def _print_registration_begin(result: object) -> None:
+    payload = {
+        "status": "authorization_required",
+        "device_code": result.device_code,
+        "user_code": result.user_code,
+        "qr_url": result.qr_url,
+        "verification_uri": result.verification_uri,
+        "verification_uri_complete": result.verification_uri_complete,
+        "interval": result.interval,
+        "expires_in": result.expires_in,
+    }
+    _json_dump(payload)
+
+
+def _print_registration_poll_result(outcome: AppRegistrationPollResult) -> int:
+    if outcome.status == "success" and outcome.result is not None:
+        _json_dump(
+            {
+                "status": outcome.status,
+                "app_id": outcome.result.app_id,
+                "app_secret": outcome.result.app_secret,
+                "domain": outcome.result.domain,
+                "open_id": outcome.result.open_id,
+            }
+        )
+        return 0
+    payload: dict[str, object] = {"status": outcome.status}
+    if outcome.message:
+        payload["message"] = outcome.message
+    _json_dump(payload)
+    return 1
+
+
+def _write_registration_env_file(path_value: str, outcome: AppRegistrationPollResult) -> None:
+    if outcome.status != "success" or outcome.result is None:
+        return
+    path = Path(path_value).expanduser()
+    if path.exists():
+        raise SystemExit(f"Refusing to overwrite existing file: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        f"FEISHU_APP_ID={outcome.result.app_id}",
+        f"FEISHU_APP_SECRET={outcome.result.app_secret}",
+        f"FEISHU_BRAND={outcome.result.domain}",
+    ]
+    if outcome.result.open_id:
+        lines.append(f"FEISHU_OWNER_OPEN_ID={outcome.result.open_id}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def cmd_setup(args: argparse.Namespace) -> int:
     print(format_setup_guide(args.brand))
     return 0
+
+
+def cmd_register_init(args: argparse.Namespace) -> int:
+    result = _registration_client_from_args(args).init()
+    if args.json:
+        _json_dump(
+            {
+                "status": "supported",
+                "nonce": result.nonce,
+                "supported_auth_methods": result.supported_auth_methods,
+            }
+        )
+    else:
+        print("Official app registration is supported in this environment.")
+        print(f"Supported auth methods: {', '.join(result.supported_auth_methods)}")
+    return 0
+
+
+def cmd_register_begin(args: argparse.Namespace) -> int:
+    result = _registration_client_from_args(args).begin()
+    if args.json:
+        _print_registration_begin(result)
+    else:
+        print("Scan-to-create authorization")
+        print(f"QR URL: {result.qr_url}")
+        print(f"Verification URL: {result.verification_uri_complete}")
+        print(f"User code: {result.user_code}")
+        print(f"Device code: {result.device_code}")
+        print(f"Poll interval: {result.interval}s")
+        print(f"Expires in: {result.expires_in}s")
+    return 0
+
+
+def cmd_register_poll(args: argparse.Namespace) -> int:
+    outcome = _registration_client_from_args(args).poll(
+        args.device_code,
+        interval=args.interval,
+        expires_in=args.expires_in,
+        tp=args.tp,
+        poll_timeout=args.poll_timeout,
+    )
+    if outcome.status == "success" and outcome.result is not None and args.write_env_file:
+        _write_registration_env_file(args.write_env_file, outcome)
+    if args.json:
+        return _print_registration_poll_result(outcome)
+    if outcome.status == "success" and outcome.result is not None:
+        print("Scan-to-create completed.")
+        print(f"App ID: {outcome.result.app_id}")
+        print(f"App Secret: {outcome.result.app_secret}")
+        print(f"Domain: {outcome.result.domain}")
+        if outcome.result.open_id:
+            print(f"Owner open_id: {outcome.result.open_id}")
+        if args.write_env_file:
+            print(f"Wrote env file: {Path(args.write_env_file).expanduser()}")
+        return 0
+    print(f"Registration status: {outcome.status}")
+    if outcome.message:
+        print(f"Message: {outcome.message}")
+    return 1
+
+
+def cmd_register_scan_create(args: argparse.Namespace) -> int:
+    client = _registration_client_from_args(args)
+    client.init()
+    begin = client.begin()
+    if args.no_poll:
+        if args.json:
+            _print_registration_begin(begin)
+        else:
+            print("Scan-to-create authorization")
+            print(f"QR URL: {begin.qr_url}")
+            print(f"User code: {begin.user_code}")
+            print(f"Device code: {begin.device_code}")
+        return 0
+    outcome = client.poll(
+        begin.device_code,
+        interval=begin.interval,
+        expires_in=begin.expires_in,
+        tp=args.tp,
+        poll_timeout=args.poll_timeout,
+    )
+    if outcome.status == "success" and outcome.result is not None and args.write_env_file:
+        _write_registration_env_file(args.write_env_file, outcome)
+    if args.json:
+        return _print_registration_poll_result(outcome)
+    if outcome.status == "success" and outcome.result is not None:
+        print("Scan-to-create completed.")
+        print(f"App ID: {outcome.result.app_id}")
+        print(f"App Secret: {outcome.result.app_secret}")
+        print(f"Domain: {outcome.result.domain}")
+        if outcome.result.open_id:
+            print(f"Owner open_id: {outcome.result.open_id}")
+        if args.write_env_file:
+            print(f"Wrote env file: {Path(args.write_env_file).expanduser()}")
+        return 0
+    print(f"Registration status: {outcome.status}")
+    if outcome.message:
+        print(f"Message: {outcome.message}")
+    return 1
+
+
+def cmd_register_probe(args: argparse.Namespace) -> int:
+    client = _require_client(args)
+    result = register_ai_agent(client)
+    payload = {
+        "ok": result.ok,
+        "app_id": result.app_id,
+        "bot_name": result.bot_name,
+        "bot_open_id": result.bot_open_id,
+        "error": result.error,
+    }
+    if args.json:
+        _json_dump(payload)
+    else:
+        print(f"OK: {'yes' if result.ok else 'no'}")
+        print(f"App ID: {result.app_id}")
+        if result.bot_name:
+            print(f"Bot name: {result.bot_name}")
+        if result.bot_open_id:
+            print(f"Bot open_id: {result.bot_open_id}")
+        if result.error:
+            print(f"Error: {result.error}")
+    return 0 if result.ok else 1
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -623,6 +804,64 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser = subparsers.add_parser("setup", help="Print zero-start app setup guidance.")
     setup_parser.add_argument("--brand", default=_default_brand(), choices=["feishu", "lark"])
     setup_parser.set_defaults(func=cmd_setup)
+
+    register_parser = subparsers.add_parser(
+        "register",
+        help="Use the official Feishu/Lark scan-to-create app registration flow.",
+    )
+    register_subparsers = register_parser.add_subparsers(dest="register_command", required=True)
+    register_common = argparse.ArgumentParser(add_help=False)
+    register_common.add_argument("--brand", default=_default_brand(), choices=["feishu", "lark"])
+
+    register_init_parser = register_subparsers.add_parser(
+        "init",
+        parents=[register_common],
+        help="Check whether official app registration supports client_secret auth.",
+    )
+    register_init_parser.add_argument("--json", action="store_true")
+    register_init_parser.set_defaults(func=cmd_register_init)
+
+    register_begin_parser = register_subparsers.add_parser(
+        "begin",
+        parents=[register_common],
+        help="Begin official scan-to-create app registration and print QR/link details.",
+    )
+    register_begin_parser.add_argument("--json", action="store_true")
+    register_begin_parser.set_defaults(func=cmd_register_begin)
+
+    register_poll_parser = register_subparsers.add_parser(
+        "poll",
+        parents=[register_common],
+        help="Poll an in-flight official app registration device code.",
+    )
+    register_poll_parser.add_argument("--device-code", required=True)
+    register_poll_parser.add_argument("--interval", type=int, default=5)
+    register_poll_parser.add_argument("--expires-in", type=int, default=600)
+    register_poll_parser.add_argument("--poll-timeout", type=int)
+    register_poll_parser.add_argument("--tp", default="ob_app")
+    register_poll_parser.add_argument("--write-env-file")
+    register_poll_parser.add_argument("--json", action="store_true")
+    register_poll_parser.set_defaults(func=cmd_register_poll)
+
+    register_scan_parser = register_subparsers.add_parser(
+        "scan-create",
+        parents=[register_common],
+        help="Run init + begin and optionally poll until scan-to-create completes.",
+    )
+    register_scan_parser.add_argument("--no-poll", action="store_true")
+    register_scan_parser.add_argument("--poll-timeout", type=int)
+    register_scan_parser.add_argument("--tp", default="ob_app")
+    register_scan_parser.add_argument("--write-env-file")
+    register_scan_parser.add_argument("--json", action="store_true")
+    register_scan_parser.set_defaults(func=cmd_register_scan_create)
+
+    register_probe_parser = register_subparsers.add_parser(
+        "probe",
+        parents=[common],
+        help="Validate credentials and register the app as an AI agent via ping.",
+    )
+    register_probe_parser.add_argument("--json", action="store_true")
+    register_probe_parser.set_defaults(func=cmd_register_probe)
 
     doctor_parser = subparsers.add_parser(
         "doctor",

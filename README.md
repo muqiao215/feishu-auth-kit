@@ -1,7 +1,7 @@
 # feishu-auth-kit
 
 Reusable Python kit for Feishu/Lark app onboarding, scope inspection, owner
-policy checks, OAuth device authorization, token persistence, generic
+policy checks, official app scan-to-create registration, OAuth device authorization, token persistence, generic
 interactive continuation payloads, and messenger-agnostic auth orchestration
 primitives.
 
@@ -13,8 +13,8 @@ coupled to any one runtime.
 
 This project exists to cover the gap between:
 
-- Feishu/Lark Open Platform setup, where a human still has to create and
-  publish the app.
+- Feishu/Lark Open Platform setup, including the official `accounts`
+  registration flow for scan-to-create bot/app onboarding.
 - Downstream runtimes that need reusable auth/onboarding primitives without
   hardcoding Feishu behavior into their own codebase.
 
@@ -27,7 +27,7 @@ Python and does not vendor TypeScript source from that project.
 
 - A small Python library for Feishu/Lark auth and onboarding primitives.
 - A CLI for setup guidance, diagnostics, token persistence, owner checks, device
-  login, batch authorization, generic interactive card payloads, auth
+  login, batch authorization, official app registration, generic interactive card payloads, auth
   orchestration planning, synthetic retry artifacts, and a tiny Claude-facing
   wrapper.
 - A reusable boundary for Claude/OpenClaw/scripts today, and a possible shared
@@ -36,15 +36,15 @@ Python and does not vendor TypeScript source from that project.
 ## Non-Goals
 
 - No ControlMesh integration in this repository or task.
-- No direct app creation inside Feishu/Lark Open Platform.
 - No bypass of tenant admin approval, app publishing, or platform review.
 - No runtime-specific UI framework baked into the library.
 - No messenger-specific callback ingress, card patch transport, or session retry
   runtime baked into the library.
 
-If you do not already have a self-built app plus `app_id` and `app_secret`, you
-still need Feishu/Lark Open Platform involvement first. This kit automates
-around that boundary; it does not replace it.
+The new scan-to-create support still uses the official Feishu/Lark registration
+surface. It can help bootstrap a bot/app from zero, but it does not replace
+Open Platform involvement, approval, publishing, or policy review. Manual
+Open Platform fallback remains available.
 
 ## Install For Development
 
@@ -60,6 +60,57 @@ Run the CLI directly:
 ```bash
 uv run feishu-auth-kit setup
 ```
+
+## Official App Registration
+
+`feishu-auth-kit` now supports the same official scan-to-create Feishu/Lark
+registration surface that OpenClaw consumes, implemented independently in
+Python.
+
+Covered flow:
+
+- `action=init` checks whether `client_secret` registration is supported.
+- `action=begin` starts a `PersonalAgent` registration session and emits a QR
+  URL decorated with `from=oc_onboard` and `tp=ob_cli_app`.
+- `action=poll` tracks the device code with `tp=ob_app`, handles
+  `authorization_pending`, `slow_down`, `access_denied`, `expired_token`, and
+  switches to Lark automatically if `tenant_brand=lark`.
+- Successful completion returns `app_id`, `app_secret`, resolved domain, and
+  the granting user's `open_id` when present.
+
+This is still the official Feishu/Lark `accounts` registration flow. It does
+not bypass authorization or create apps through undocumented backdoors.
+
+Examples:
+
+```bash
+feishu-auth-kit register init --json
+
+feishu-auth-kit register begin --json
+
+feishu-auth-kit register scan-create --no-poll --json
+
+feishu-auth-kit register poll \
+  --device-code dev_xxx \
+  --interval 5 \
+  --expires-in 600 \
+  --poll-timeout 120 \
+  --json
+```
+
+One-shot flow:
+
+```bash
+feishu-auth-kit register scan-create \
+  --poll-timeout 180 \
+  --write-env-file ./.feishu-auth.env \
+  --json
+```
+
+The optional `--write-env-file` writes a local env-style file containing
+`FEISHU_APP_ID`, `FEISHU_APP_SECRET`, `FEISHU_BRAND`, and
+`FEISHU_OWNER_OPEN_ID` when available. It never mutates your global shell
+environment.
 
 ## Credentials
 
@@ -148,6 +199,22 @@ feishu-auth-kit owner-check \
   --mode strict_owner \
   --json
 ```
+
+## AI Agent Probe
+
+After scan-to-create or manual credential setup, you can validate the app and
+trigger official AI-agent registration support through the Feishu/Lark
+OpenClaw bot ping endpoint:
+
+```bash
+feishu-auth-kit register probe \
+  --app-id cli_xxx \
+  --app-secret yyy \
+  --json
+```
+
+This uses `/open-apis/bot/v1/openclaw_bot/ping` and is kept as a small helper
+surface rather than a runtime integration.
 
 ## Generic Interactive Runtime
 
@@ -270,6 +337,14 @@ Suggested Claude agent pattern:
    `feishu-auth-kit runtime continue ...`.
 4. Continue your own auth workflow using the confirmed continuation state.
 
+For zero-to-app onboarding, a Claude-driven agent can also:
+
+1. Call `feishu-auth-kit register scan-create --no-poll --json`.
+2. Render or relay the returned `qr_url`, `user_code`, and `device_code`.
+3. Call `feishu-auth-kit register poll ... --json` after the user scans.
+4. Store or forward the returned `app_id` / `app_secret` without coupling this
+   repository to Claude runtime internals.
+
 This keeps the runtime contract small and avoids coupling the repo to a
 particular bot framework.
 
@@ -368,9 +443,17 @@ implement the final messenger runtime glue.
 
 ## Existing Auth Commands
 
+### `register`
+
+Runs the official Feishu/Lark app registration flow.
+
+```bash
+feishu-auth-kit register scan-create --no-poll --json
+```
+
 ### `setup`
 
-Print a zero-start guide for the human Open Platform step.
+Print a zero-start guide covering official scan-to-create plus manual fallback.
 
 ```bash
 feishu-auth-kit setup
@@ -423,6 +506,7 @@ feishu-auth-kit batch-auth \
 
 ```python
 from feishu_auth_kit import (
+    AppRegistrationClient,
     ContinuationState,
     DeviceFlowClient,
     FeishuAuthClient,
@@ -438,6 +522,14 @@ app_info = client.get_app_info()
 owner = check_owner_policy(app_info, current_user_open_id="ou_owner")
 user_scopes = client.get_granted_scopes(token_type="user")
 safe_batches = batch_scopes(filter_sensitive_scopes(user_scopes), batch_size=100)
+
+registration = AppRegistrationClient()
+begin = registration.begin()
+poll = registration.poll(
+    begin.device_code,
+    interval=begin.interval,
+    expires_in=begin.expires_in,
+)
 
 device = DeviceFlowClient("cli_xxx", "secret")
 authorization = device.request_authorization(safe_batches[0])

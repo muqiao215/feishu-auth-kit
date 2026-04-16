@@ -1,4 +1,12 @@
 from . import cli
+from .app_registration import (
+    AppRegistrationBeginResult,
+    AppRegistrationClient,
+    AppRegistrationError,
+    AppRegistrationInitResult,
+    AppRegistrationPollResult,
+    AppRegistrationResult,
+)
 from .claude_adapter import build_claude_device_flow_payload, build_claude_permission_payload
 from .client import FeishuAuthClient, build_permission_url
 from .device_flow import DeviceFlowClient, DeviceFlowError
@@ -24,6 +32,7 @@ from .owner_policy import (
     assert_owner_policy,
     check_owner_policy,
 )
+from .probe import FeishuProbeResult, probe_ai_agent_credentials, register_ai_agent
 from .runtime_cards import (
     CardAction,
     ContinuationState,
@@ -40,6 +49,12 @@ TenantToken = TenantAccessToken
 
 __all__ = [
     "AppInfo",
+    "AppRegistrationBeginResult",
+    "AppRegistrationClient",
+    "AppRegistrationError",
+    "AppRegistrationInitResult",
+    "AppRegistrationPollResult",
+    "AppRegistrationResult",
     "AppScope",
     "CardAction",
     "ContinuationState",
@@ -51,6 +66,7 @@ __all__ = [
     "FileContinuationStore",
     "FilePendingFlowRegistry",
     "FileTokenStore",
+    "FeishuProbeResult",
     "OwnerPolicyError",
     "OwnerPolicyMode",
     "OwnerPolicyResult",
@@ -76,7 +92,9 @@ __all__ = [
     "cli",
     "load_auth_continuation",
     "plan_scope_authorization",
+    "probe_ai_agent_credentials",
     "process_card_action",
+    "register_ai_agent",
     "route_auth_requirement",
     "save_auth_continuation",
     "verify_access_token_identity",

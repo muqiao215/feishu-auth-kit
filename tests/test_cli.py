@@ -3,6 +3,11 @@ from __future__ import annotations
 import json
 
 from feishu_auth_kit import cli
+from feishu_auth_kit.app_registration import (
+    AppRegistrationBeginResult,
+    AppRegistrationPollResult,
+    AppRegistrationResult,
+)
 
 
 def test_setup_output_contains_manual_open_platform_steps(capsys) -> None:
@@ -11,8 +16,8 @@ def test_setup_output_contains_manual_open_platform_steps(capsys) -> None:
 
     assert exit_code == 0
     assert "Feishu / Lark app setup guide" in captured.out
-    assert "cannot create the app for you" in captured.out
-    assert "Open Platform" in captured.out
+    assert "official scan-to-create app registration flow" in captured.out
+    assert "Open Platform approval" in captured.out
     assert "application:application:self_manage" in captured.out
     assert "offline_access" in captured.out
 
@@ -219,3 +224,92 @@ def test_orchestration_retry_command_builds_artifact_from_continuation(
     assert payload["kind"] == "synthetic_retry"
     assert payload["operation_id"] == "op-123"
     assert payload["user_open_id"] == "ou_user"
+
+
+def test_register_scan_create_no_poll_emits_structured_payload(monkeypatch, capsys) -> None:
+    class FakeRegistrationClient:
+        def __init__(self, *args, **kwargs) -> None:
+            self.args = args
+            self.kwargs = kwargs
+
+        def init(self) -> None:
+            return None
+
+        def begin(self) -> AppRegistrationBeginResult:
+            return AppRegistrationBeginResult(
+                device_code="dev-123",
+                qr_url="https://accounts.feishu.cn/verify?device_code=dev-123&from=oc_onboard&tp=ob_cli_app",
+                user_code="ABCD-EFGH",
+                interval=5,
+                expires_in=600,
+                verification_uri="https://accounts.feishu.cn/verify",
+                verification_uri_complete="https://accounts.feishu.cn/verify?device_code=dev-123",
+            )
+
+    monkeypatch.setattr(cli, "AppRegistrationClient", FakeRegistrationClient)
+
+    exit_code = cli.main(["register", "scan-create", "--no-poll", "--json"])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["status"] == "authorization_required"
+    assert payload["device_code"] == "dev-123"
+    assert payload["qr_url"].startswith("https://accounts.feishu.cn/verify")
+    assert payload["interval"] == 5
+    assert payload["expires_in"] == 600
+
+
+def test_register_poll_command_emits_success_payload(monkeypatch, capsys) -> None:
+    class FakeRegistrationClient:
+        def __init__(self, *args, **kwargs) -> None:
+            self.args = args
+            self.kwargs = kwargs
+
+        def poll(
+            self,
+            device_code: str,
+            *,
+            interval: int,
+            expires_in: int,
+            tp: str,
+            poll_timeout: int | None = None,
+        ) -> AppRegistrationPollResult:
+            assert device_code == "dev-123"
+            assert interval == 5
+            assert expires_in == 600
+            assert tp == "ob_app"
+            assert poll_timeout == 30
+            return AppRegistrationPollResult(
+                status="success",
+                result=AppRegistrationResult(
+                    app_id="cli_new",
+                    app_secret="secret-new",
+                    domain="feishu",
+                    open_id="ou_owner",
+                ),
+            )
+
+    monkeypatch.setattr(cli, "AppRegistrationClient", FakeRegistrationClient)
+
+    exit_code = cli.main(
+        [
+            "register",
+            "poll",
+            "--device-code",
+            "dev-123",
+            "--interval",
+            "5",
+            "--expires-in",
+            "600",
+            "--poll-timeout",
+            "30",
+            "--json",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["status"] == "success"
+    assert payload["app_id"] == "cli_new"
+    assert payload["app_secret"] == "secret-new"
+    assert payload["domain"] == "feishu"
