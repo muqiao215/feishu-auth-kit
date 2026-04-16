@@ -12,6 +12,15 @@ from .claude_adapter import (
 from .client import FeishuApiError, FeishuAuthClient
 from .device_flow import DeviceFlowClient, DeviceFlowError
 from .models import DeviceAuthorization
+from .orchestration import (
+    AuthRequirement,
+    FilePendingFlowRegistry,
+    build_synthetic_retry_artifact,
+    load_auth_continuation,
+    plan_scope_authorization,
+    route_auth_requirement,
+    verify_access_token_identity,
+)
 from .owner_policy import OwnerPolicyMode, check_owner_policy
 from .runtime_cards import (
     CardAction,
@@ -106,6 +115,10 @@ def _token_store_from_args(args: argparse.Namespace) -> FileTokenStore:
 
 def _continuation_store_from_args(args: argparse.Namespace) -> FileContinuationStore:
     return FileContinuationStore(getattr(args, "continuation_store_path", None))
+
+
+def _pending_flow_store_from_args(args: argparse.Namespace) -> FilePendingFlowRegistry:
+    return FilePendingFlowRegistry(getattr(args, "pending_flow_store_path", None))
 
 
 def cmd_setup(args: argparse.Namespace) -> int:
@@ -494,6 +507,111 @@ def cmd_claude_device_card(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_orchestration_plan(args: argparse.Namespace) -> int:
+    requested_scopes = _split_csv(args.requested_scope)
+    plan = plan_scope_authorization(
+        requested_scopes=requested_scopes,
+        app_granted_scopes=_split_csv(args.app_scope),
+        user_granted_scopes=_split_csv(args.user_scope),
+        batch_size=args.batch_size,
+        filter_sensitive=not args.keep_sensitive,
+    )
+    _json_dump(
+        {
+            "requested_scopes": plan.requested_scopes,
+            "app_granted_scopes": plan.app_granted_scopes,
+            "user_granted_scopes": plan.user_granted_scopes,
+            "already_granted_scopes": plan.already_granted_scopes,
+            "missing_user_scopes": plan.missing_user_scopes,
+            "unavailable_scopes": plan.unavailable_scopes,
+            "batches": plan.batches,
+        }
+    )
+    return 0
+
+
+def cmd_orchestration_route(args: argparse.Namespace) -> int:
+    authorization = None
+    if args.error_kind != "app_scope_missing":
+        authorization = DeviceAuthorization(
+            device_code=args.device_code,
+            user_code=args.user_code,
+            verification_uri=args.verification_uri,
+            verification_uri_complete=args.verification_uri_complete or args.verification_uri,
+            expires_in=args.expires_in,
+            interval=args.interval,
+        )
+    result = route_auth_requirement(
+        app_id=args.app_id,
+        requirement=AuthRequirement(
+            error_kind=args.error_kind,
+            required_scopes=_split_csv(args.required_scope),
+            token_type=args.token_type,
+            scope_need_type=args.scope_need_type,
+            user_open_id=args.user_open_id,
+            flow_key=args.flow_key,
+            operation_id=args.operation_id,
+            metadata={"source": args.source} if args.source else {},
+        ),
+        pending_flows=_pending_flow_store_from_args(args),
+        continuation_store=_continuation_store_from_args(args),
+        permission_url=args.permission_url,
+        authorization=authorization,
+    )
+    _json_dump(
+        {
+            "decision": result.decision,
+            "reused_existing_flow": result.reused_existing_flow,
+            "flow": {
+                "flow_key": result.flow.flow_key,
+                "operation_id": result.flow.operation_id,
+                "required_scopes": result.flow.required_scopes,
+                "token_type": result.flow.token_type,
+                "scope_need_type": result.flow.scope_need_type,
+            },
+            "continuation": result.continuation.to_state().payload,
+            "card": result.card.to_dict() if result.card else None,
+        }
+    )
+    return 0
+
+
+def cmd_orchestration_retry(args: argparse.Namespace) -> int:
+    continuation = load_auth_continuation(
+        _continuation_store_from_args(args),
+        args.operation_id,
+    )
+    if continuation is None:
+        print("Continuation not found.")
+        return 1
+    artifact = build_synthetic_retry_artifact(
+        operation_id=continuation.operation_id,
+        app_id=continuation.app_id,
+        user_open_id=continuation.user_open_id,
+        text=args.text,
+        reason=args.reason,
+        metadata={"flow_key": continuation.flow_key, **continuation.metadata},
+    )
+    _json_dump(artifact.to_dict())
+    return 0
+
+
+def cmd_orchestration_verify_identity(args: argparse.Namespace) -> int:
+    result = verify_access_token_identity(
+        access_token=args.access_token,
+        expected_open_id=args.expected_open_id,
+        brand=args.brand,
+    )
+    _json_dump(
+        {
+            "valid": result.valid,
+            "expected_open_id": result.expected_open_id,
+            "actual_open_id": result.actual_open_id,
+        }
+    )
+    return 0 if result.valid else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="feishu-auth-kit")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -682,6 +800,91 @@ def build_parser() -> argparse.ArgumentParser:
     claude_device_parser.add_argument("--expires-in", type=int, required=True)
     claude_device_parser.add_argument("--interval", type=int, default=5)
     claude_device_parser.set_defaults(func=cmd_claude_device_card)
+
+    orchestration_parser = subparsers.add_parser(
+        "orchestration",
+        help="Build auth orchestration plans, routed card payloads, and retry artifacts.",
+    )
+    orchestration_subparsers = orchestration_parser.add_subparsers(
+        dest="orchestration_command",
+        required=True,
+    )
+
+    orchestration_plan_parser = orchestration_subparsers.add_parser(
+        "plan",
+        help="Compare requested scopes against app and user grants, then batch missing scopes.",
+    )
+    orchestration_plan_parser.add_argument(
+        "--requested-scope",
+        action="append",
+        default=[],
+        required=True,
+    )
+    orchestration_plan_parser.add_argument("--app-scope", action="append", default=[])
+    orchestration_plan_parser.add_argument("--user-scope", action="append", default=[])
+    orchestration_plan_parser.add_argument("--batch-size", type=int, default=100)
+    orchestration_plan_parser.add_argument("--keep-sensitive", action="store_true")
+    orchestration_plan_parser.set_defaults(func=cmd_orchestration_plan)
+
+    orchestration_route_parser = orchestration_subparsers.add_parser(
+        "route",
+        help="Map a structured auth requirement to a reusable card plan and continuation state.",
+    )
+    orchestration_route_parser.add_argument("--app-id", required=True)
+    orchestration_route_parser.add_argument(
+        "--error-kind",
+        choices=["app_scope_missing", "user_auth_required", "user_scope_insufficient"],
+        required=True,
+    )
+    orchestration_route_parser.add_argument(
+        "--required-scope",
+        action="append",
+        default=[],
+        required=True,
+    )
+    orchestration_route_parser.add_argument("--user-open-id")
+    orchestration_route_parser.add_argument("--flow-key")
+    orchestration_route_parser.add_argument("--operation-id")
+    orchestration_route_parser.add_argument("--source")
+    orchestration_route_parser.add_argument(
+        "--token-type",
+        choices=["tenant", "user"],
+        default="user",
+    )
+    orchestration_route_parser.add_argument(
+        "--scope-need-type",
+        choices=["one", "all"],
+        default="all",
+    )
+    orchestration_route_parser.add_argument("--permission-url")
+    orchestration_route_parser.add_argument("--device-code", default="device-code")
+    orchestration_route_parser.add_argument("--user-code", default="user-code")
+    orchestration_route_parser.add_argument("--verification-uri", default="https://example.test/verify")
+    orchestration_route_parser.add_argument("--verification-uri-complete")
+    orchestration_route_parser.add_argument("--expires-in", type=int, default=600)
+    orchestration_route_parser.add_argument("--interval", type=int, default=5)
+    orchestration_route_parser.add_argument("--continuation-store-path")
+    orchestration_route_parser.add_argument("--pending-flow-store-path")
+    orchestration_route_parser.set_defaults(func=cmd_orchestration_route)
+
+    orchestration_retry_parser = orchestration_subparsers.add_parser(
+        "retry",
+        help="Build a messenger-agnostic synthetic retry artifact from saved continuation state.",
+    )
+    orchestration_retry_parser.add_argument("--operation-id", required=True)
+    orchestration_retry_parser.add_argument("--text", required=True)
+    orchestration_retry_parser.add_argument("--reason", default="auth_completed")
+    orchestration_retry_parser.add_argument("--continuation-store-path")
+    orchestration_retry_parser.set_defaults(func=cmd_orchestration_retry)
+
+    orchestration_verify_parser = orchestration_subparsers.add_parser(
+        "verify-identity",
+        parents=[common],
+        help="Verify that an access token belongs to the expected open_id.",
+    )
+    orchestration_verify_parser.add_argument("--access-token", required=True)
+    orchestration_verify_parser.add_argument("--expected-open-id", required=True)
+    orchestration_verify_parser.set_defaults(func=cmd_orchestration_verify_identity)
     return parser
 
 

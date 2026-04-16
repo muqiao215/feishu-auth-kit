@@ -98,3 +98,124 @@ def test_tokens_commands_can_save_and_report_status(tmp_path, capsys) -> None:
     assert status_exit_code == 0
     assert payload["exists"] is True
     assert payload["scope"] == "offline_access"
+
+
+def test_orchestration_plan_command_emits_scope_diff(capsys) -> None:
+    exit_code = cli.main(
+        [
+            "orchestration",
+            "plan",
+            "--requested-scope",
+            "offline_access,im:message:readonly",
+            "--app-scope",
+            "offline_access,im:message:readonly",
+            "--user-scope",
+            "offline_access",
+        ]
+    )
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["missing_user_scopes"] == ["im:message:readonly"]
+    assert payload["already_granted_scopes"] == ["offline_access"]
+
+
+def test_orchestration_route_command_reuses_pending_flow_and_persists_state(
+    tmp_path,
+    capsys,
+) -> None:
+    continuation_path = tmp_path / "continuations.json"
+    pending_path = tmp_path / "pending.json"
+    args = [
+        "orchestration",
+        "route",
+        "--app-id",
+        "cli_xxx",
+        "--error-kind",
+        "app_scope_missing",
+        "--required-scope",
+        "offline_access",
+        "--user-open-id",
+        "ou_user",
+        "--flow-key",
+        "flow-1",
+        "--permission-url",
+        "https://open.feishu.cn/app/cli_xxx/auth?q=offline_access",
+        "--continuation-store-path",
+        str(continuation_path),
+        "--pending-flow-store-path",
+        str(pending_path),
+    ]
+
+    first_exit_code = cli.main(args)
+    first_output = json.loads(capsys.readouterr().out)
+    second_exit_code = cli.main(
+        [
+            *args[: args.index("--required-scope") + 2],
+            "--required-scope",
+            "im:message:readonly",
+            *args[args.index("--user-open-id") :],
+        ]
+    )
+    second_output = json.loads(capsys.readouterr().out)
+
+    assert first_exit_code == 0
+    assert second_exit_code == 0
+    assert first_output["flow"]["operation_id"] == second_output["flow"]["operation_id"]
+    assert second_output["reused_existing_flow"] is True
+    assert second_output["flow"]["required_scopes"] == [
+        "offline_access",
+        "im:message:readonly",
+    ]
+
+
+def test_orchestration_retry_command_builds_artifact_from_continuation(
+    tmp_path,
+    capsys,
+) -> None:
+    continuation_path = tmp_path / "continuations.json"
+    route_exit_code = cli.main(
+        [
+            "orchestration",
+            "route",
+            "--app-id",
+            "cli_xxx",
+            "--error-kind",
+            "app_scope_missing",
+            "--required-scope",
+            "offline_access",
+            "--user-open-id",
+            "ou_user",
+            "--flow-key",
+            "flow-1",
+            "--operation-id",
+            "op-123",
+            "--permission-url",
+            "https://open.feishu.cn/app/cli_xxx/auth?q=offline_access",
+            "--continuation-store-path",
+            str(continuation_path),
+            "--pending-flow-store-path",
+            str(tmp_path / "pending.json"),
+        ]
+    )
+    _ = capsys.readouterr()
+    retry_exit_code = cli.main(
+        [
+            "orchestration",
+            "retry",
+            "--operation-id",
+            "op-123",
+            "--text",
+            "请继续之前的操作",
+            "--continuation-store-path",
+            str(continuation_path),
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert route_exit_code == 0
+    assert retry_exit_code == 0
+    assert payload["kind"] == "synthetic_retry"
+    assert payload["operation_id"] == "op-123"
+    assert payload["user_open_id"] == "ou_user"

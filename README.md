@@ -1,8 +1,9 @@
 # feishu-auth-kit
 
 Reusable Python kit for Feishu/Lark app onboarding, scope inspection, owner
-policy checks, OAuth device authorization, token persistence, and generic
-interactive continuation payloads.
+policy checks, OAuth device authorization, token persistence, generic
+interactive continuation payloads, and messenger-agnostic auth orchestration
+primitives.
 
 This repository stays standalone. It is designed to be consumed by Claude Code,
 OpenClaw integrations, shell scripts, or future ControlMesh work, but it is not
@@ -26,8 +27,9 @@ Python and does not vendor TypeScript source from that project.
 
 - A small Python library for Feishu/Lark auth and onboarding primitives.
 - A CLI for setup guidance, diagnostics, token persistence, owner checks, device
-  login, batch authorization, generic interactive card payloads, and a tiny
-  Claude-facing wrapper.
+  login, batch authorization, generic interactive card payloads, auth
+  orchestration planning, synthetic retry artifacts, and a tiny Claude-facing
+  wrapper.
 - A reusable boundary for Claude/OpenClaw/scripts today, and a possible shared
   dependency for other systems later.
 
@@ -37,6 +39,8 @@ Python and does not vendor TypeScript source from that project.
 - No direct app creation inside Feishu/Lark Open Platform.
 - No bypass of tenant admin approval, app publishing, or platform review.
 - No runtime-specific UI framework baked into the library.
+- No messenger-specific callback ingress, card patch transport, or session retry
+  runtime baked into the library.
 
 If you do not already have a self-built app plus `app_id` and `app_secret`, you
 still need Feishu/Lark Open Platform involvement first. This kit automates
@@ -268,6 +272,99 @@ Suggested Claude agent pattern:
 
 This keeps the runtime contract small and avoids coupling the repo to a
 particular bot framework.
+
+## Auth Orchestration Primitives
+
+`feishu-auth-kit` now includes a reusable orchestration layer for the gap
+between:
+
+- app/user scope comparison
+- permission-missing vs user-auth-required routing
+- duplicate suppression and scope merge for pending flows
+- continuation state persistence
+- post-auth synthetic retry artifacts for the host runtime
+
+The repository still does not own messenger glue. A host is expected to render
+cards, receive user callbacks, and inject retry events into its own session
+pipeline.
+
+### Plan Scope Authorization
+
+```bash
+feishu-auth-kit orchestration plan \
+  --requested-scope offline_access,im:message:readonly \
+  --app-scope offline_access,im:message:readonly \
+  --user-scope offline_access
+```
+
+This reports:
+
+- already granted user scopes
+- missing user scopes
+- unavailable scopes that the app has not enabled
+- batch splits for incremental authorization
+
+### Route An Auth Requirement
+
+```bash
+feishu-auth-kit orchestration route \
+  --app-id cli_xxx \
+  --error-kind app_scope_missing \
+  --required-scope offline_access \
+  --user-open-id ou_user \
+  --flow-key flow-1 \
+  --permission-url "https://open.feishu.cn/app/cli_xxx/auth?q=offline_access"
+```
+
+This produces:
+
+- a reusable pending-flow record
+- continuation state with `required_scopes`, `token_type`,
+  `scope_need_type`, `flow_key`, and metadata
+- a generic permission or device-flow card payload
+
+Repeated calls with the same `flow-key` reuse the existing `operation_id` and
+merge scopes instead of creating duplicate flows.
+
+### Build A Synthetic Retry Artifact
+
+```bash
+feishu-auth-kit orchestration retry \
+  --operation-id op_123 \
+  --text "Please continue the previous operation."
+```
+
+The output is a messenger-agnostic retry artifact. A host runtime can consume
+it and decide how to re-inject the continuation into its own message/session
+pipeline.
+
+### Verify Device-Flow Identity
+
+```bash
+feishu-auth-kit orchestration verify-identity \
+  --brand feishu \
+  --access-token token \
+  --expected-open-id ou_user
+```
+
+This checks `/open-apis/authen/v1/user_info` and confirms whether the completed
+OAuth flow belongs to the expected user.
+
+### Host Integration Pattern
+
+Minimal host loop:
+
+1. Host detects a permission or auth error in its own runtime.
+2. Host calls `feishu-auth-kit orchestration route ...`.
+3. Host renders the returned card JSON to the user.
+4. User confirms completion in the host UI.
+5. Host loads the saved continuation and, after the auth step succeeds, calls
+   `feishu-auth-kit orchestration retry ...`.
+6. Host consumes the retry artifact and re-injects the original operation in
+   its own session/orchestrator.
+
+This repository intentionally stops at the reusable boundary above. It does not
+implement the final messenger runtime glue.
 
 ## Existing Auth Commands
 
