@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling>=1.26.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "feishu-auth-kit"
+version = "0.1.0"
+description = "Reusable Feishu/Lark auth and onboarding kit for Python CLIs and services."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "Ductor Workspace Agent" },
+]
+dependencies = [
+  "requests>=2.32.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.0",
+  "ruff>=0.11.0",
+]
+
+[project.scripts]
+feishu-auth-kit = "feishu_auth_kit.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/feishu_auth_kit"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
