@@ -1,17 +1,34 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from collections.abc import Iterable
 
+from .claude_adapter import (
+    build_claude_device_flow_payload,
+    build_claude_permission_payload,
+)
 from .client import FeishuApiError, FeishuAuthClient
 from .device_flow import DeviceFlowClient, DeviceFlowError
+from .models import DeviceAuthorization
+from .owner_policy import OwnerPolicyMode, check_owner_policy
+from .runtime_cards import (
+    CardAction,
+    ContinuationState,
+    FileContinuationStore,
+    build_device_flow_card,
+    build_permission_missing_card,
+    new_operation_id,
+    process_card_action,
+)
 from .scopes import (
     batch_scopes,
     filter_sensitive_scopes,
     missing_core_scopes,
     summarize_scope_batches,
 )
+from .token_store import FileTokenStore, StoredUserToken
 
 
 def format_setup_guide(brand: str = "feishu") -> str:
@@ -79,6 +96,18 @@ def _print_scope_block(title: str, scopes: list[str]) -> None:
         print(f"  - {scope}")
 
 
+def _json_dump(payload: object) -> None:
+    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def _token_store_from_args(args: argparse.Namespace) -> FileTokenStore:
+    return FileTokenStore(getattr(args, "token_store_path", None))
+
+
+def _continuation_store_from_args(args: argparse.Namespace) -> FileContinuationStore:
+    return FileContinuationStore(getattr(args, "continuation_store_path", None))
+
+
 def cmd_setup(args: argparse.Namespace) -> int:
     print(format_setup_guide(args.brand))
     return 0
@@ -112,6 +141,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print(f"App info: OK ({app_info.app_id})")
     if app_info.name:
         print(f"App name: {app_info.name}")
+    if app_info.effective_owner_open_id:
+        print(f"App owner open_id: {app_info.effective_owner_open_id}")
     tenant_scopes = client.get_granted_scopes(token_type="tenant", app_info=app_info)
     user_scopes = client.get_granted_scopes(token_type="user", app_info=app_info)
     all_scopes = client.get_granted_scopes(app_info=app_info)
@@ -173,6 +204,14 @@ def cmd_login(args: argparse.Namespace) -> int:
     print("Device flow completed.")
     print(f"Access token acquired: {'yes' if token.access_token else 'no'}")
     print(f"Granted scope: {token.scope or '(not returned)'}")
+    save_user_open_id = getattr(args, "save_user_open_id", None)
+    if save_user_open_id:
+        stored = _token_store_from_args(args).save_device_token(
+            client.app_id,
+            save_user_open_id,
+            token,
+        )
+        print(f"Stored token for {stored.user_open_id} at {_token_store_from_args(args).path}")
     return 0
 
 
@@ -200,7 +239,7 @@ def cmd_batch_auth(args: argparse.Namespace) -> int:
             print("Stopping after link generation because --no-poll was used.")
             return 0
         try:
-            flow.poll_for_token(
+            token = flow.poll_for_token(
                 auth.device_code,
                 interval=auth.interval,
                 expires_in=auth.expires_in,
@@ -208,6 +247,250 @@ def cmd_batch_auth(args: argparse.Namespace) -> int:
         except DeviceFlowError as exc:
             print(f"Batch {index} failed: {exc}")
             return 1
+        if args.save_user_open_id:
+            _token_store_from_args(args).save_device_token(
+                client.app_id,
+                args.save_user_open_id,
+                token,
+            )
+    return 0
+
+
+def cmd_tokens_status(args: argparse.Namespace) -> int:
+    status = _token_store_from_args(args).status(args.app_id, args.user_open_id)
+    if args.json:
+        _json_dump(
+            {
+                "app_id": status.app_id,
+                "user_open_id": status.user_open_id,
+                "exists": status.exists,
+                "scope": status.scope,
+                "expires_at": status.expires_at,
+                "refresh_expires_at": status.refresh_expires_at,
+                "storage_path": str(status.storage_path),
+            }
+        )
+    else:
+        print(f"Exists: {'yes' if status.exists else 'no'}")
+        print(f"Storage path: {status.storage_path}")
+        if status.exists:
+            print(f"Scope: {status.scope or '(unknown)'}")
+            print(f"Expires at: {status.expires_at or 'unknown'}")
+    return 0
+
+
+def cmd_tokens_show(args: argparse.Namespace) -> int:
+    token = _token_store_from_args(args).load(args.app_id, args.user_open_id)
+    if not token:
+        print("Token not found.")
+        return 1
+    _json_dump(
+        {
+            "app_id": token.app_id,
+            "user_open_id": token.user_open_id,
+            "access_token": token.access_token,
+            "refresh_token": token.refresh_token,
+            "expires_at": token.expires_at,
+            "refresh_expires_at": token.refresh_expires_at,
+            "scope": token.scope,
+        }
+    )
+    return 0
+
+
+def cmd_tokens_save(args: argparse.Namespace) -> int:
+    token = StoredUserToken(
+        app_id=args.app_id,
+        user_open_id=args.user_open_id,
+        access_token=args.access_token,
+        refresh_token=args.refresh_token,
+        expires_at=args.expires_at,
+        refresh_expires_at=args.refresh_expires_at,
+        scope=args.scope,
+    )
+    store = _token_store_from_args(args)
+    store.save(token)
+    print(f"Saved token to {store.path}")
+    return 0
+
+
+def cmd_tokens_remove(args: argparse.Namespace) -> int:
+    removed = _token_store_from_args(args).remove(args.app_id, args.user_open_id)
+    print("Removed." if removed else "Token not found.")
+    return 0 if removed else 1
+
+
+def cmd_owner_check(args: argparse.Namespace) -> int:
+    client = _require_client(args)
+    mode = OwnerPolicyMode(args.mode)
+    result = check_owner_policy(
+        client,
+        current_user_open_id=args.current_user_open_id,
+        mode=mode,
+        app_id=args.target_app_id,
+    )
+    if args.json:
+        _json_dump(
+            {
+                "allowed": result.allowed,
+                "mode": result.mode.value,
+                "owner_open_id": result.owner_open_id,
+                "current_user_open_id": result.current_user_open_id,
+                "reason": result.reason,
+                "app_id": result.app_info.app_id,
+            }
+        )
+    else:
+        print(f"Allowed: {'yes' if result.allowed else 'no'}")
+        print(f"Mode: {result.mode.value}")
+        print(f"Owner open_id: {result.owner_open_id or '(unknown)'}")
+        print(f"Reason: {result.reason}")
+    return 0 if result.allowed else 1
+
+
+def _save_card_state(
+    args: argparse.Namespace,
+    *,
+    operation_id: str,
+    kind: str,
+    payload: dict[str, object],
+) -> None:
+    _continuation_store_from_args(args).save(
+        ContinuationState(
+            operation_id=operation_id,
+            app_id=args.app_id,
+            kind=kind,
+            status="waiting",
+            payload=payload,
+        )
+    )
+
+
+def cmd_runtime_permission_card(args: argparse.Namespace) -> int:
+    operation_id = args.operation_id or new_operation_id()
+    missing_scopes = _split_csv(args.scope)
+    card = build_permission_missing_card(
+        app_id=args.app_id,
+        operation_id=operation_id,
+        missing_scopes=missing_scopes,
+        permission_url=args.permission_url,
+        user_open_id=args.user_open_id,
+    )
+    _save_card_state(
+        args,
+        operation_id=operation_id,
+        kind="permission_missing",
+        payload={
+            "missing_scopes": missing_scopes,
+            "permission_url": args.permission_url,
+            "user_open_id": args.user_open_id,
+        },
+    )
+    _json_dump(card.to_dict())
+    return 0
+
+
+def cmd_runtime_device_card(args: argparse.Namespace) -> int:
+    operation_id = args.operation_id or new_operation_id()
+    authorization = DeviceAuthorization(
+        device_code=args.device_code,
+        user_code=args.user_code,
+        verification_uri=args.verification_uri,
+        verification_uri_complete=args.verification_uri_complete or args.verification_uri,
+        expires_in=args.expires_in,
+        interval=args.interval,
+    )
+    card = build_device_flow_card(
+        app_id=args.app_id,
+        operation_id=operation_id,
+        authorization=authorization,
+    )
+    _save_card_state(
+        args,
+        operation_id=operation_id,
+        kind="device_flow_authorization",
+        payload=card.to_dict()["fields"],
+    )
+    _json_dump(card.to_dict())
+    return 0
+
+
+def cmd_runtime_continue(args: argparse.Namespace) -> int:
+    result = process_card_action(
+        CardAction(
+            action=args.action,
+            payload={
+                "operation_id": args.operation_id,
+                "actor_open_id": args.actor_open_id,
+            },
+        ),
+        _continuation_store_from_args(args),
+    )
+    _json_dump(
+        {
+            "operation_id": result.operation_id,
+            "app_id": result.app_id,
+            "kind": result.kind,
+            "status": result.status,
+            "payload": result.payload,
+        }
+    )
+    return 0
+
+
+def cmd_claude_permission_card(args: argparse.Namespace) -> int:
+    operation_id = args.operation_id or new_operation_id()
+    missing_scopes = _split_csv(args.scope)
+    _save_card_state(
+        args,
+        operation_id=operation_id,
+        kind="permission_missing",
+        payload={
+            "missing_scopes": missing_scopes,
+            "permission_url": args.permission_url,
+            "user_open_id": args.user_open_id,
+        },
+    )
+    payload = build_claude_permission_payload(
+        app_id=args.app_id,
+        operation_id=operation_id,
+        missing_scopes=missing_scopes,
+        permission_url=args.permission_url,
+        user_open_id=args.user_open_id,
+    )
+    _json_dump(payload)
+    return 0
+
+
+def cmd_claude_device_card(args: argparse.Namespace) -> int:
+    operation_id = args.operation_id or new_operation_id()
+    authorization = DeviceAuthorization(
+        device_code=args.device_code,
+        user_code=args.user_code,
+        verification_uri=args.verification_uri,
+        verification_uri_complete=args.verification_uri_complete or args.verification_uri,
+        expires_in=args.expires_in,
+        interval=args.interval,
+    )
+    _save_card_state(
+        args,
+        operation_id=operation_id,
+        kind="device_flow_authorization",
+        payload={
+            "device_code": authorization.device_code,
+            "user_code": authorization.user_code,
+            "verification_uri": authorization.verification_uri,
+            "verification_uri_complete": authorization.verification_uri_complete,
+            "expires_in": authorization.expires_in,
+            "interval": authorization.interval,
+        },
+    )
+    payload = build_claude_device_flow_payload(
+        app_id=args.app_id,
+        operation_id=operation_id,
+        authorization=authorization,
+    )
+    _json_dump(payload)
     return 0
 
 
@@ -250,6 +533,8 @@ def build_parser() -> argparse.ArgumentParser:
     login_parser.add_argument("--scope", action="append", default=[])
     login_parser.add_argument("--all-app-user-scopes", action="store_true")
     login_parser.add_argument("--no-poll", action="store_true")
+    login_parser.add_argument("--save-user-open-id")
+    login_parser.add_argument("--token-store-path")
     login_parser.set_defaults(func=cmd_login)
 
     batch_parser = subparsers.add_parser(
@@ -259,7 +544,144 @@ def build_parser() -> argparse.ArgumentParser:
     )
     batch_parser.add_argument("--batch-size", type=int, default=100)
     batch_parser.add_argument("--no-poll", action="store_true")
+    batch_parser.add_argument("--save-user-open-id")
+    batch_parser.add_argument("--token-store-path")
     batch_parser.set_defaults(func=cmd_batch_auth)
+
+    tokens_parser = subparsers.add_parser(
+        "tokens",
+        help="Persist, inspect, and remove user tokens from a file-backed store.",
+    )
+    tokens_subparsers = tokens_parser.add_subparsers(dest="tokens_command", required=True)
+    token_common = argparse.ArgumentParser(add_help=False)
+    token_common.add_argument("--app-id", required=True)
+    token_common.add_argument("--user-open-id", required=True)
+    token_common.add_argument("--token-store-path")
+
+    tokens_status_parser = tokens_subparsers.add_parser(
+        "status",
+        parents=[token_common],
+        help="Show token presence and metadata.",
+    )
+    tokens_status_parser.add_argument("--json", action="store_true")
+    tokens_status_parser.set_defaults(func=cmd_tokens_status)
+
+    tokens_show_parser = tokens_subparsers.add_parser(
+        "show",
+        parents=[token_common],
+        help="Load and print a stored token.",
+    )
+    tokens_show_parser.set_defaults(func=cmd_tokens_show)
+
+    tokens_save_parser = tokens_subparsers.add_parser(
+        "save",
+        parents=[token_common],
+        help="Store a token explicitly.",
+    )
+    tokens_save_parser.add_argument("--access-token", required=True)
+    tokens_save_parser.add_argument("--refresh-token")
+    tokens_save_parser.add_argument("--expires-at", type=int)
+    tokens_save_parser.add_argument("--refresh-expires-at", type=int)
+    tokens_save_parser.add_argument("--scope")
+    tokens_save_parser.set_defaults(func=cmd_tokens_save)
+
+    tokens_remove_parser = tokens_subparsers.add_parser(
+        "remove",
+        parents=[token_common],
+        help="Delete a stored token.",
+    )
+    tokens_remove_parser.set_defaults(func=cmd_tokens_remove)
+
+    owner_parser = subparsers.add_parser(
+        "owner-check",
+        parents=[common],
+        help="Enforce app owner policy against current user open_id.",
+    )
+    owner_parser.add_argument("--target-app-id", default="me")
+    owner_parser.add_argument("--current-user-open-id", required=True)
+    owner_parser.add_argument(
+        "--mode",
+        choices=[mode.value for mode in OwnerPolicyMode],
+        default=OwnerPolicyMode.STRICT_OWNER.value,
+    )
+    owner_parser.add_argument("--json", action="store_true")
+    owner_parser.set_defaults(func=cmd_owner_check)
+
+    runtime_parser = subparsers.add_parser(
+        "runtime",
+        help="Build generic interactive card payloads and process continuation actions.",
+    )
+    runtime_subparsers = runtime_parser.add_subparsers(dest="runtime_command", required=True)
+    runtime_common = argparse.ArgumentParser(add_help=False)
+    runtime_common.add_argument("--app-id", required=True)
+    runtime_common.add_argument("--operation-id")
+    runtime_common.add_argument("--continuation-store-path")
+
+    runtime_permission_parser = runtime_subparsers.add_parser(
+        "permission-card",
+        parents=[runtime_common],
+        help="Emit a generic permission-missing card JSON payload.",
+    )
+    runtime_permission_parser.add_argument("--scope", action="append", default=[], required=True)
+    runtime_permission_parser.add_argument("--permission-url", required=True)
+    runtime_permission_parser.add_argument("--user-open-id")
+    runtime_permission_parser.set_defaults(func=cmd_runtime_permission_card)
+
+    runtime_device_parser = runtime_subparsers.add_parser(
+        "device-card",
+        parents=[runtime_common],
+        help="Emit a generic device-flow authorization card JSON payload.",
+    )
+    runtime_device_parser.add_argument("--device-code", required=True)
+    runtime_device_parser.add_argument("--user-code", required=True)
+    runtime_device_parser.add_argument("--verification-uri", required=True)
+    runtime_device_parser.add_argument("--verification-uri-complete")
+    runtime_device_parser.add_argument("--expires-in", type=int, required=True)
+    runtime_device_parser.add_argument("--interval", type=int, default=5)
+    runtime_device_parser.set_defaults(func=cmd_runtime_device_card)
+
+    runtime_continue_parser = runtime_subparsers.add_parser(
+        "continue",
+        help="Process a user-confirmed continuation action.",
+    )
+    runtime_continue_parser.add_argument("--operation-id", required=True)
+    runtime_continue_parser.add_argument("--action", required=True)
+    runtime_continue_parser.add_argument("--actor-open-id")
+    runtime_continue_parser.add_argument("--continuation-store-path")
+    runtime_continue_parser.set_defaults(func=cmd_runtime_continue)
+
+    claude_parser = subparsers.add_parser(
+        "claude",
+        help="Emit Claude-facing structured JSON payloads based on generic card abstractions.",
+    )
+    claude_subparsers = claude_parser.add_subparsers(dest="claude_command", required=True)
+    claude_common = argparse.ArgumentParser(add_help=False)
+    claude_common.add_argument("--app-id", required=True)
+    claude_common.add_argument("--operation-id")
+    claude_common.add_argument("--continuation-store-path")
+
+    claude_permission_parser = claude_subparsers.add_parser(
+        "permission-card",
+        parents=[claude_common],
+        help="Emit a Claude-facing permission card wrapper.",
+    )
+    claude_permission_parser.add_argument("--scope", action="append", default=[], required=True)
+    claude_permission_parser.add_argument("--permission-url", required=True)
+    claude_permission_parser.add_argument("--user-open-id")
+    claude_permission_parser.set_defaults(func=cmd_claude_permission_card)
+
+    claude_device_parser = claude_subparsers.add_parser(
+        "device-card",
+        parents=[claude_common],
+        help="Emit a Claude-facing device-flow card wrapper.",
+    )
+    claude_device_parser.add_argument("--device-code", required=True)
+    claude_device_parser.add_argument("--user-code", required=True)
+    claude_device_parser.add_argument("--verification-uri", required=True)
+    claude_device_parser.add_argument("--verification-uri-complete")
+    claude_device_parser.add_argument("--expires-in", type=int, required=True)
+    claude_device_parser.add_argument("--interval", type=int, default=5)
+    claude_device_parser.set_defaults(func=cmd_claude_device_card)
     return parser
 
 
