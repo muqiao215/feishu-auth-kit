@@ -72,6 +72,16 @@ def _step_title(event: AgentEvent) -> str:
         return f"Tool: {event.tool_name or 'unknown'}"
     if event.kind == "tool_result":
         return f"Tool result: {event.tool_name or 'unknown'}"
+    if event.kind == "start":
+        return "Runner started"
+    if event.kind == "running":
+        return "Runner running"
+    if event.kind == "completed":
+        return "Runner completed"
+    if event.kind == "error":
+        return "Runner error"
+    if event.kind == "stderr_warning":
+        return "Runner warning"
     if event.kind == "assistant_message":
         return "Assistant response"
     return event.text or "Runtime status"
@@ -105,7 +115,7 @@ def build_single_card_run(
         message_id=context.message_id,
         chat_id=context.chat_id,
         sender_open_id=context.sender_open_id,
-        status="completed",
+        status=result.status,
         summary=_summary(result.output_text),
         final_text=result.output_text,
         steps=steps,

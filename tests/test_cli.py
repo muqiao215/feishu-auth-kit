@@ -8,6 +8,8 @@ from feishu_auth_kit.app_registration import (
     AppRegistrationPollResult,
     AppRegistrationResult,
 )
+from feishu_auth_kit.orchestration import AuthContinuation
+from feishu_auth_kit.runtime_cards import FileContinuationStore
 
 
 def test_setup_output_contains_manual_open_platform_steps(capsys) -> None:
@@ -405,3 +407,82 @@ def test_agent_run_command_builds_single_card_demo_payload(tmp_path, capsys) -> 
     assert payload["result"]["runner"] == "echo"
     assert payload["result"]["output_text"] == "Codex stub: 请回复 OK"
     assert payload["card"]["schema"] == "feishu-auth-kit.cardkit.single_card.v1"
+
+
+def test_agent_run_emit_events_outputs_jsonl(tmp_path, capsys) -> None:
+    event_path = tmp_path / "event.json"
+    event_path.write_text(
+        json.dumps(
+            {
+                "header": {"event_id": "evt_123", "event_type": "im.message.receive_v1"},
+                "event": {
+                    "sender": {"sender_id": {"open_id": "ou_user"}},
+                    "message": {"message_id": "om_123", "content": "{\"text\":\"hi\"}"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(
+        ["agent", "run", "--event-file", str(event_path), "--runner", "echo", "--emit-events"]
+    )
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
+
+    assert exit_code == 0
+    assert lines[0]["schema"] == "feishu-auth-kit.agent-event.v1"
+    assert lines[-1]["schema"] == "feishu-auth-kit.agent-run-summary.v1"
+    assert lines[-1]["result"]["runner"] == "echo"
+
+
+def test_agent_action_to_retry_cli_resolves_native_contract(tmp_path, capsys) -> None:
+    store = FileContinuationStore(tmp_path / "continuations.json")
+    store.save(
+        AuthContinuation(
+            operation_id="op-123",
+            flow_key="flow-123",
+            app_id="cli_xxx",
+            decision="permission_card",
+            user_open_id="ou_user",
+            required_scopes=["offline_access"],
+            token_type="user",
+            scope_need_type="all",
+            metadata={"session_id": "sess-1"},
+        ).to_state()
+    )
+
+    bind_exit = cli.main(
+        [
+            "agent",
+            "bind-continuation",
+            "--operation-id",
+            "op-123",
+            "--text",
+            "请继续之前的操作",
+            "--continuation-store-path",
+            str(tmp_path / "continuations.json"),
+        ]
+    )
+    bind_payload = json.loads(capsys.readouterr().out)
+    retry_exit = cli.main(
+        [
+            "agent",
+            "action-to-retry",
+            "--operation-id",
+            "op-123",
+            "--action",
+            "permissions_granted_continue",
+            "--actor-open-id",
+            "ou_actor",
+            "--continuation-store-path",
+            str(tmp_path / "continuations.json"),
+        ]
+    )
+    retry_payload = json.loads(capsys.readouterr().out)
+
+    assert bind_exit == 0
+    assert bind_payload["schema"] == "feishu-auth-kit.native-continuation.v1"
+    assert retry_exit == 0
+    assert retry_payload["retry_request"]["schema"] == "feishu-auth-kit.native-retry-request.v1"
+    assert retry_payload["retry_request"]["text"] == "请继续之前的操作"
+    assert retry_payload["retry_artifact"]["reason"] == "permissions_granted_continue"

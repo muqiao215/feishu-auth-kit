@@ -41,8 +41,9 @@ runtime.
 | Token storage | File-backed user token persistence keyed by `app_id + open_id` |
 | Owner policy | Strict owner-only or permissive-if-unknown checks |
 | Native inbound | Normalize Feishu IM events into a stable message context envelope |
-| Runner seam | Minimal `EchoRunner` and `CodexCliRunner` adapters for local agent execution |
-| CardKit | Single-card step snapshot model for status, tool calls, tool results, and final text |
+| Runner seam | `EchoRunner` plus `CodexCliRunner` with minimal lifecycle/tool-step event parsing from `codex exec --json` |
+| CardKit | Single-card step snapshot model for lifecycle, tool calls, tool results, warnings, and final text |
+| Native contract | Card action -> continuation -> retry request/artifact contract, independent of any host runtime |
 | Runtime cards | Generic permission-missing and device-flow card payloads |
 | Orchestration | Pending flow registry, scope merge, batch planning, synthetic retry |
 | Claude surface | Thin JSON wrapper for Claude/tool callers |
@@ -71,6 +72,7 @@ backdoor around the platform.
 - scope inspection, owner policy, token storage, continuations, retry artifacts
 - Feishu native inbound message context normalization
 - runner seams that can hand a normalized turn to Codex or another local agent
+- native card action -> continuation -> retry contract
 - single-card runtime snapshots that preserve tool-step structure
 
 Downstream hosts should own:
@@ -294,6 +296,68 @@ The output is JSON containing:
 - a `feishu-auth-kit.cardkit.single_card.v1` snapshot ready for a future Feishu
   card sender
 
+If you want the runner events as line-delimited JSON instead of one aggregate
+payload:
+
+```bash
+feishu-auth-kit agent run \
+  --event-file ./examples/feishu-event.json \
+  --runner codex \
+  --codex-cd . \
+  --emit-events
+```
+
+Current minimal Codex event semantics:
+
+- lifecycle: `start`, `running`, `completed`, `error`
+- tool-step seam: `tool_call`, `tool_result`
+- user-visible output: `assistant_message`
+- non-fatal logs: `stderr_warning`
+
+This is intentionally minimal. It does not yet model every internal Codex item
+type, partial token stream, or multi-message conversational transcript.
+
+## Native Card Action Contract
+
+`feishu-auth-kit` now defines a native contract that is independent from
+ControlMesh:
+
+- `NativeCardAction`
+- `NativeContinuationRecord`
+- `NativeRetryRequest`
+
+The intended flow is:
+
+1. an auth/orchestration step creates a continuation
+2. `agent bind-continuation` upgrades it into a native retry contract
+3. a future Feishu sender/callback runtime turns a button click into
+   `NativeCardAction`
+4. `agent action-to-retry` resolves that action back into a retry request and
+   synthetic retry artifact
+
+Example:
+
+```bash
+feishu-auth-kit agent bind-continuation \
+  --operation-id op_123 \
+  --text "Please continue the previous operation."
+
+feishu-auth-kit agent action-to-retry \
+  --operation-id op_123 \
+  --action permissions_granted_continue \
+  --actor-open-id ou_user
+```
+
+The second command emits:
+
+- the normalized card action
+- the confirmed native continuation record
+- a `feishu-auth-kit.native-retry-request.v1`
+- a `feishu-auth-kit.synthetic-retry.v1`
+
+This repo still does not ship a real Feishu sender or callback server. A host
+runtime such as ControlMesh can consume these contracts later.
+
 ## Auth Orchestration
 
 The orchestration layer converts permission and auth failures into reusable
@@ -425,6 +489,7 @@ A host runtime should own:
 - token and continuation state
 - inbound message context normalization
 - local runner seams
+- native card action -> continuation -> retry contracts
 - single-card step model
 - permission and auth planning
 - synthetic retry artifacts

@@ -17,6 +17,12 @@ from .client import FeishuApiError, FeishuAuthClient
 from .device_flow import DeviceFlowClient, DeviceFlowError
 from .message_context import parse_feishu_message_context
 from .models import DeviceAuthorization
+from .native_contract import (
+    NativeCardAction,
+    bind_auth_continuation_to_native,
+    build_retry_artifact_from_request,
+    resolve_card_action_to_retry,
+)
 from .orchestration import (
     AuthRequirement,
     FilePendingFlowRegistry,
@@ -114,6 +120,10 @@ def _print_scope_block(title: str, scopes: list[str]) -> None:
 
 def _json_dump(payload: object) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def _json_line(payload: object) -> None:
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
 
 
 def _load_json_file(path_value: str) -> dict:
@@ -825,6 +835,24 @@ def cmd_agent_run(args: argparse.Namespace) -> int:
         runner = EchoRunner(prefix=args.echo_prefix)
     result = runner.run(request)
     card = build_single_card_run(context, result)
+    if args.emit_events:
+        for index, event in enumerate(result.events, start=1):
+            _json_line(
+                {
+                    "schema": "feishu-auth-kit.agent-event.v1",
+                    "index": index,
+                    "runner": result.runner,
+                    **event.to_dict(),
+                }
+            )
+        _json_line(
+            {
+                "schema": "feishu-auth-kit.agent-run-summary.v1",
+                "result": result.to_dict(),
+                "card": card.to_dict(),
+            }
+        )
+        return 0 if result.status == "completed" else 1
     _json_dump(
         {
             "schema": "feishu-auth-kit.agent-run.v1",
@@ -832,6 +860,38 @@ def cmd_agent_run(args: argparse.Namespace) -> int:
             "request": request.to_dict(),
             "result": result.to_dict(),
             "card": card.to_dict(),
+        }
+    )
+    return 0 if result.status == "completed" else 1
+
+
+def cmd_agent_bind_continuation(args: argparse.Namespace) -> int:
+    continuation = bind_auth_continuation_to_native(
+        _continuation_store_from_args(args),
+        operation_id=args.operation_id,
+        retry_text=args.text,
+        metadata={"source": args.source} if args.source else {},
+    )
+    _json_dump(continuation.to_dict())
+    return 0
+
+
+def cmd_agent_action_to_retry(args: argparse.Namespace) -> int:
+    resolved = resolve_card_action_to_retry(
+        NativeCardAction(
+            operation_id=args.operation_id,
+            action=args.action,
+            actor_open_id=args.actor_open_id,
+            message_id=args.message_id,
+            payload=_load_json_file(args.payload_file) if args.payload_file else {},
+        ),
+        _continuation_store_from_args(args),
+    )
+    artifact = build_retry_artifact_from_request(resolved.retry_request)
+    _json_dump(
+        {
+            **resolved.to_dict(),
+            "retry_artifact": artifact.to_dict(),
         }
     )
     return 0
@@ -1196,7 +1256,30 @@ def build_parser() -> argparse.ArgumentParser:
     agent_run_parser.add_argument("--codex-cd")
     agent_run_parser.add_argument("--codex-arg", action="append", default=[])
     agent_run_parser.add_argument("--timeout", type=int, default=180)
+    agent_run_parser.add_argument("--emit-events", action="store_true")
     agent_run_parser.set_defaults(func=cmd_agent_run)
+
+    agent_bind_parser = agent_subparsers.add_parser(
+        "bind-continuation",
+        help="Bind an existing continuation to a native retry contract.",
+    )
+    agent_bind_parser.add_argument("--operation-id", required=True)
+    agent_bind_parser.add_argument("--text", required=True)
+    agent_bind_parser.add_argument("--source")
+    agent_bind_parser.add_argument("--continuation-store-path")
+    agent_bind_parser.set_defaults(func=cmd_agent_bind_continuation)
+
+    agent_action_parser = agent_subparsers.add_parser(
+        "action-to-retry",
+        help="Resolve a native card action into a retry turn request and artifact.",
+    )
+    agent_action_parser.add_argument("--operation-id", required=True)
+    agent_action_parser.add_argument("--action", required=True)
+    agent_action_parser.add_argument("--actor-open-id")
+    agent_action_parser.add_argument("--message-id")
+    agent_action_parser.add_argument("--payload-file")
+    agent_action_parser.add_argument("--continuation-store-path")
+    agent_action_parser.set_defaults(func=cmd_agent_action_to_retry)
     return parser
 
 

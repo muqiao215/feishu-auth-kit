@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from subprocess import CompletedProcess
+
 from feishu_auth_kit.agent_runtime import (
     AgentEvent,
     AgentTurnRequest,
     AgentTurnResult,
+    CodexCliRunner,
     EchoRunner,
 )
 from feishu_auth_kit.cardkit import build_single_card_run
@@ -67,3 +70,56 @@ def test_cardkit_single_card_keeps_tool_steps_and_final_text() -> None:
     assert payload["steps"][2]["kind"] == "tool_result"
     assert payload["final_text"] == "我已经找到 Alice 的联系方式。"
 
+
+def test_codex_cli_runner_parses_json_events_into_lifecycle_and_tool_steps(monkeypatch) -> None:
+    command_started = (
+        '{"type":"item.started","item":{"id":"item_0","type":"command_execution",'
+        '"command":"/bin/bash -lc pwd","status":"in_progress"}}'
+    )
+    command_completed = (
+        '{"type":"item.completed","item":{"id":"item_0","type":"command_execution",'
+        '"command":"/bin/bash -lc pwd","aggregated_output":"/tmp\\\\n",'
+        '"exit_code":0,"status":"completed"}}'
+    )
+
+    def fake_run(command, *, input, text, capture_output, timeout, check):  # noqa: ANN001
+        output_path = command[command.index("-o") + 1]
+        assert "--json" in command
+        assert input.endswith("帮我总结今天待办")
+        with open(output_path, "w", encoding="utf-8") as handle:
+            handle.write("最终答案")
+        return CompletedProcess(
+            args=command,
+            returncode=0,
+            stdout="\n".join(
+                [
+                    '{"type":"thread.started","thread_id":"thread-1"}',
+                    '{"type":"turn.started"}',
+                    command_started,
+                    command_completed,
+                    '{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"最终答案"}}',
+                    '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2}}',
+                ]
+            ),
+            stderr="warning: partial stderr",
+        )
+
+    monkeypatch.setattr("feishu_auth_kit.agent_runtime.subprocess.run", fake_run)
+
+    request = AgentTurnRequest.from_message_context(_context())
+    result = CodexCliRunner(codex_bin="codex").run(request)
+
+    assert result.status == "completed"
+    assert result.output_text == "最终答案"
+    assert [event.kind for event in result.events] == [
+        "start",
+        "running",
+        "tool_call",
+        "tool_result",
+        "assistant_message",
+        "completed",
+        "stderr_warning",
+    ]
+    assert result.events[2].tool_name == "shell.command"
+    assert result.events[3].metadata["exit_code"] == 0
+    assert result.events[-1].kind == "stderr_warning"
