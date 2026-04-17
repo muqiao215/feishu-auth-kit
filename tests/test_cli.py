@@ -313,3 +313,95 @@ def test_register_poll_command_emits_success_payload(monkeypatch, capsys) -> Non
     assert payload["app_id"] == "cli_new"
     assert payload["app_secret"] == "secret-new"
     assert payload["domain"] == "feishu"
+
+
+def test_agent_parse_inbound_command_emits_normalized_message_context(tmp_path, capsys) -> None:
+    event_path = tmp_path / "event.json"
+    event_path.write_text(
+        json.dumps(
+            {
+                "header": {
+                    "event_id": "evt_123",
+                    "event_type": "im.message.receive_v1",
+                    "app_id": "cli_xxx",
+                    "tenant_key": "tenant_123",
+                },
+                "event": {
+                    "sender": {
+                        "sender_id": {
+                            "open_id": "ou_user",
+                            "user_id": "u_user",
+                        }
+                    },
+                    "message": {
+                        "message_id": "om_123",
+                        "chat_id": "oc_123",
+                        "chat_type": "p2p",
+                        "message_type": "text",
+                        "content": "{\"text\":\"@_user_1 帮我总结今天待办\"}",
+                        "mentions": [
+                            {
+                                "key": "@_user_1",
+                                "name": "bot",
+                                "id": {"open_id": "ou_bot"},
+                            }
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(["agent", "parse-inbound", "--event-file", str(event_path)])
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["schema"] == "feishu-auth-kit.message-context.v1"
+    assert payload["message_id"] == "om_123"
+    assert payload["prompt_text"] == "帮我总结今天待办"
+
+
+def test_agent_run_command_builds_single_card_demo_payload(tmp_path, capsys) -> None:
+    event_path = tmp_path / "event.json"
+    event_path.write_text(
+        json.dumps(
+            {
+                "header": {
+                    "event_id": "evt_123",
+                    "event_type": "im.message.receive_v1",
+                    "app_id": "cli_xxx",
+                },
+                "event": {
+                    "sender": {"sender_id": {"open_id": "ou_user"}},
+                    "message": {
+                        "message_id": "om_123",
+                        "chat_id": "oc_123",
+                        "message_type": "text",
+                        "content": "{\"text\":\"请回复 OK\"}",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(
+        [
+            "agent",
+            "run",
+            "--event-file",
+            str(event_path),
+            "--runner",
+            "echo",
+            "--echo-prefix",
+            "Codex stub",
+        ]
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert payload["context"]["prompt_text"] == "请回复 OK"
+    assert payload["result"]["runner"] == "echo"
+    assert payload["result"]["output_text"] == "Codex stub: 请回复 OK"
+    assert payload["card"]["schema"] == "feishu-auth-kit.cardkit.single_card.v1"

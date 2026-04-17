@@ -6,13 +6,16 @@ import os
 from collections.abc import Iterable
 from pathlib import Path
 
+from .agent_runtime import AgentTurnRequest, CodexCliRunner, EchoRunner
 from .app_registration import AppRegistrationClient, AppRegistrationPollResult
+from .cardkit import build_single_card_run
 from .claude_adapter import (
     build_claude_device_flow_payload,
     build_claude_permission_payload,
 )
 from .client import FeishuApiError, FeishuAuthClient
 from .device_flow import DeviceFlowClient, DeviceFlowError
+from .message_context import parse_feishu_message_context
 from .models import DeviceAuthorization
 from .orchestration import (
     AuthRequirement,
@@ -111,6 +114,10 @@ def _print_scope_block(title: str, scopes: list[str]) -> None:
 
 def _json_dump(payload: object) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def _load_json_file(path_value: str) -> dict:
+    return json.loads(Path(path_value).expanduser().read_text(encoding="utf-8"))
 
 
 def _token_store_from_args(args: argparse.Namespace) -> FileTokenStore:
@@ -793,6 +800,43 @@ def cmd_orchestration_verify_identity(args: argparse.Namespace) -> int:
     return 0 if result.valid else 1
 
 
+def cmd_agent_parse_inbound(args: argparse.Namespace) -> int:
+    context = parse_feishu_message_context(_load_json_file(args.event_file))
+    _json_dump(context.to_dict())
+    return 0
+
+
+def cmd_agent_run(args: argparse.Namespace) -> int:
+    context = parse_feishu_message_context(_load_json_file(args.event_file))
+    request = AgentTurnRequest.from_message_context(
+        context,
+        system_prompt=args.system_prompt,
+        session_id=args.session_id,
+    )
+    if args.runner == "codex":
+        runner = CodexCliRunner(
+            codex_bin=args.codex_bin,
+            model=args.model,
+            cwd=args.codex_cd,
+            extra_args=args.codex_arg,
+            timeout=args.timeout,
+        )
+    else:
+        runner = EchoRunner(prefix=args.echo_prefix)
+    result = runner.run(request)
+    card = build_single_card_run(context, result)
+    _json_dump(
+        {
+            "schema": "feishu-auth-kit.agent-run.v1",
+            "context": context.to_dict(),
+            "request": request.to_dict(),
+            "result": result.to_dict(),
+            "card": card.to_dict(),
+        }
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="feishu-auth-kit")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1124,6 +1168,35 @@ def build_parser() -> argparse.ArgumentParser:
     orchestration_verify_parser.add_argument("--access-token", required=True)
     orchestration_verify_parser.add_argument("--expected-open-id", required=True)
     orchestration_verify_parser.set_defaults(func=cmd_orchestration_verify_identity)
+
+    agent_parser = subparsers.add_parser(
+        "agent",
+        help="Normalize Feishu inbound messages and run a minimal native agent turn.",
+    )
+    agent_subparsers = agent_parser.add_subparsers(dest="agent_command", required=True)
+
+    agent_parse_parser = agent_subparsers.add_parser(
+        "parse-inbound",
+        help="Normalize a Feishu inbound event into a stable message context envelope.",
+    )
+    agent_parse_parser.add_argument("--event-file", required=True)
+    agent_parse_parser.set_defaults(func=cmd_agent_parse_inbound)
+
+    agent_run_parser = agent_subparsers.add_parser(
+        "run",
+        help="Run a minimal native agent turn and emit a single-card step snapshot.",
+    )
+    agent_run_parser.add_argument("--event-file", required=True)
+    agent_run_parser.add_argument("--runner", choices=["echo", "codex"], default="echo")
+    agent_run_parser.add_argument("--system-prompt")
+    agent_run_parser.add_argument("--session-id")
+    agent_run_parser.add_argument("--echo-prefix", default="Echo")
+    agent_run_parser.add_argument("--codex-bin", default="codex")
+    agent_run_parser.add_argument("--model")
+    agent_run_parser.add_argument("--codex-cd")
+    agent_run_parser.add_argument("--codex-arg", action="append", default=[])
+    agent_run_parser.add_argument("--timeout", type=int, default=180)
+    agent_run_parser.set_defaults(func=cmd_agent_run)
     return parser
 
 
