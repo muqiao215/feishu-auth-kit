@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "feishu-auth-kit"
 version = "0.1.0"
-description = "Reusable Feishu/Lark auth and onboarding kit for Python CLIs and services."
+description = "Standalone Feishu native agent kit for auth, inbound context, cards, and runner seams."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
