@@ -3,7 +3,9 @@ from __future__ import annotations
 from feishu_auth_kit import (
     build_native_agent_tool_selection_prompt,
     build_tool_result_followup_prompt,
+    get_native_agent_tool_spec,
     native_agent_tool_specs,
+    native_user_auth_scopes,
     parse_native_agent_tool_selection,
 )
 
@@ -13,6 +15,22 @@ def test_native_agent_tool_specs_include_contact_search() -> None:
 
     assert "contact.search_user" in specs
     assert specs["contact.search_user"].parameters["query"] == "string"
+    assert specs["contact.search_user"].required_scopes == ("contact:user:search",)
+
+
+def test_get_native_agent_tool_spec_returns_known_tool() -> None:
+    spec = get_native_agent_tool_spec("im.get_messages")
+
+    assert spec is not None
+    assert "im:message:readonly" in spec.required_scopes
+
+
+def test_native_user_auth_scopes_dedupes_all_required_scopes() -> None:
+    scopes = native_user_auth_scopes()
+
+    assert scopes[0] == "offline_access"
+    assert "contact:user:search" in scopes
+    assert "space:document:retrieve" in scopes
 
 
 def test_parse_native_agent_tool_selection_accepts_known_tool() -> None:
