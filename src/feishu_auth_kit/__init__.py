@@ -21,6 +21,14 @@ from .client import FeishuAuthClient, build_permission_url
 from .device_flow import DeviceFlowClient, DeviceFlowError
 from .message_context import FeishuMention, FeishuMessageContext, parse_feishu_message_context
 from .models import AppInfo, DeviceAuthorization, DeviceToken, ScopeGrant, TenantAccessToken
+from .native_agent_tools import (
+    FeishuNativeAgentToolSelection,
+    FeishuNativeAgentToolSpec,
+    build_native_agent_tool_selection_prompt,
+    build_tool_result_followup_prompt,
+    native_agent_tool_specs,
+    parse_native_agent_tool_selection,
+)
 from .native_contract import (
     NativeCardAction,
     NativeContinuationRecord,
@@ -92,6 +100,8 @@ __all__ = [
     "FeishuAuthClient",
     "FeishuMention",
     "FeishuMessageContext",
+    "FeishuNativeAgentToolSelection",
+    "FeishuNativeAgentToolSpec",
     "FileContinuationStore",
     "FilePendingFlowRegistry",
     "FileTokenStore",
@@ -121,8 +131,10 @@ __all__ = [
     "build_claude_device_flow_payload",
     "build_claude_permission_payload",
     "build_device_flow_card",
+    "build_native_agent_tool_selection_prompt",
     "build_permission_missing_card",
     "build_permission_url",
+    "build_tool_result_followup_prompt",
     "build_retry_artifact_from_request",
     "build_single_card_run",
     "build_synthetic_retry_artifact",
@@ -131,6 +143,7 @@ __all__ = [
     "load_auth_continuation",
     "load_native_continuation",
     "parse_feishu_message_context",
+    "parse_native_agent_tool_selection",
     "plan_scope_authorization",
     "probe_ai_agent_credentials",
     "process_card_action",
@@ -139,5 +152,6 @@ __all__ = [
     "route_auth_requirement",
     "save_auth_continuation",
     "save_native_continuation",
+    "native_agent_tool_specs",
     "verify_access_token_identity",
 ]
