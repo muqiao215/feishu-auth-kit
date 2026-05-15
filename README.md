@@ -2,9 +2,9 @@
 
 中文 | [English Summary](#english-summary)
 
-`feishu-auth-kit` 是一个飞书原生智能体元能力仓库，负责认证、入站消息上下文、
-runner seam、CardKit 单卡快照，以及 card action -> continuation -> retry
-contract。
+`feishu-auth-kit` 是从 `ControlMesh` 抽取出来的飞书第一方模块仓库，负责认证、
+入站消息上下文、runner seam、CardKit 单卡快照，以及
+card action -> continuation -> retry contract。
 
 它最初偏 auth/onboarding，现在已经升级为更完整的 Feishu native agent kit。
 当前最小验证目标很明确：在树莓派这类已有 Codex CLI 的机器上，先证明它能把飞书
@@ -12,8 +12,8 @@ contract。
 
 和 ControlMesh 的关系也要说清楚：
 
-- `feishu-auth-kit` 是上游、可复用的飞书元能力仓库。
-- `ControlMesh` 必须包含这套能力作为内置 Feishu native plugin。
+- `feishu-auth-kit` 是从 `ControlMesh` 抽出来并持续同步的第一方模块。
+- `ControlMesh` 必须包含这套能力作为内置 Feishu native runtime 组成部分。
 - 其他宿主也可以单独消费它，而不必复制飞书 auth/runtime 核心逻辑。
 
 ## 为什么存在
@@ -33,8 +33,9 @@ contract。
 - 授权完成后的 synthetic retry artifact
 
 这个仓库的作用，就是把这些元能力从宿主 runtime 里抽出来，做成一个独立 Python
-库和 CLI。宿主比如 ControlMesh、Claude Code、OpenClaw，或者自定义脚本，都
-可以复用它，而不是各自重写一套飞书 auth/native runtime seam。
+库和 CLI，同时继续作为 ControlMesh 第一方 Feishu 模块的同步出口。宿主比如
+ControlMesh、Claude Code、OpenClaw，或者自定义脚本，都可以复用它，而不是
+各自重写一套飞书 auth/native runtime seam。
 
 ## 当前能力
 
@@ -503,10 +504,10 @@ uv run pytest -q
 
 ## English Summary
 
-`feishu-auth-kit` is the upstream reusable Feishu native agent capability kit.
-It owns auth/onboarding primitives, inbound message normalization, runner
-seams, single-card snapshots, and the native card action -> continuation ->
-retry contract.
+`feishu-auth-kit` is the extracted first-party Feishu native agent module from
+`ControlMesh`. It owns auth/onboarding primitives, inbound message
+normalization, runner seams, single-card snapshots, and the native card action
+-> continuation -> retry contract.
 
-`ControlMesh` should include it as a bundled Feishu native plugin, while other
-hosts may also consume it standalone.
+`ControlMesh` should include it as a bundled Feishu native runtime component,
+while other hosts may also consume the same module standalone.
