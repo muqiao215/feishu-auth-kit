@@ -145,6 +145,28 @@ export class FeishuAuthClient {
     return payload;
   }
 
+  async requestWithTenantToken(
+    urlOrPath: string,
+    options: {
+      method?: string;
+      headers?: Record<string, string>;
+      body?: any;
+      params?: Record<string, string>;
+    } = {}
+  ): Promise<any> {
+    const token = (await this.getTenantAccessToken()).token;
+    const url = urlOrPath.startsWith("http://") || urlOrPath.startsWith("https://")
+      ? urlOrPath
+      : `${this.domains.openBase}${urlOrPath.startsWith("/") ? "" : "/"}${urlOrPath}`;
+    return this.requestJson(url, {
+      ...options,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...options.headers,
+      },
+    });
+  }
+
   async getTenantAccessToken(options?: { forceRefresh?: boolean }): Promise<TenantAccessToken> {
     if (this.tenantToken && !options?.forceRefresh) {
       return this.tenantToken;

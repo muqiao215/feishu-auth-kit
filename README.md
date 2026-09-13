@@ -51,6 +51,9 @@ ControlMesh、Claude Code、OpenClaw，或者自定义脚本，都可以复用�
 | Runner seam | `EchoRunner` 与 `CodexCliRunner`，可解析 `codex exec --json` 的最小 lifecycle/tool-step 事件 |
 | Native tool selection | 原生工具列表、tool-selection JSON contract、tool-result followup prompt |
 | CardKit | 生命周期、tool call/result、warning、final text 的单卡快照模型 |
+| Streaming & Throttle | 吸收 `openclaw-lark` 的 `FlushController` 与 `StreamingCardController`，打字机流式输出与 300ms 防抖更新，避免触发飞书限流 |
+| Reactions | IM 消息表情交互（`addReaction` / `removeReaction` / `withReactionLifecycle`），支持处理中/成功/失败状态标记 |
+| Interactive Dispatcher | CardKit 按钮与回调事件分发器，支持路由、Toast 与原地更新卡片 |
 | Native contract | 独立于宿主 runtime 的 card action -> continuation -> retry request/artifact contract |
 | Runtime cards | 通用的缺权限卡、device-flow 卡片 payload |
 | Orchestration | pending flow registry、scope merge、batch planning、synthetic retry |

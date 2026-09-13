@@ -15,6 +15,10 @@ export * from './orchestration.js';
 export * from './native-contract.js';
 export * from './native-agent-tools.js';
 export * from './claude-adapter.js';
+export * from './flush-controller.js';
+export * from './streaming-card.js';
+export * from './reactions.js';
+export * from './interactive-dispatcher.js';
 
 import { ScopeGrant, TenantAccessToken } from './models.js';
 export type AppScope = ScopeGrant;
