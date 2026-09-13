@@ -92,8 +92,25 @@ scan-to-create 走的仍然是官方 Feishu/Lark 注册面。它能把 bot/app �
 
 ## 开发安装
 
+### TypeScript / Node.js
+
 ```bash
-cd /root/.ductor/workspace/feishu-auth-kit
+pnpm install
+pnpm run build
+pnpm test
+pnpm run typecheck
+```
+
+运行 CLI：
+
+```bash
+./dist/cli.js setup
+# 或通过 pnpm link -g / npm link 在系统 PATH 中提供 feishu-auth-kit
+```
+
+### Python
+
+```bash
 uv sync --extra dev
 uv run pytest -q
 uv run ruff check .
