@@ -4,6 +4,26 @@ on:
   schedule:
     - cron: "17 */6 * * *"
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry-run mode (do not create or patch GitHub issues)"
+        required: false
+        default: false
+        type: boolean
+      cycle:
+        description: "Digest cycle window"
+        required: false
+        default: "weekly"
+        type: choice
+        options:
+          - weekly
+          - monthly
+          - rolling
+      lookback_days:
+        description: "Lookback days when no cursor exists"
+        required: false
+        default: "14"
+        type: string
 
 permissions:
   contents: read
@@ -16,6 +36,7 @@ concurrency:
 jobs:
   upstream-watch:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -25,8 +46,22 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Restore upstream watch state
+        uses: actions/cache@v4
+        with:
+          path: .upstream-watch/state.json
+          key: upstream-watch-state-${{ github.run_id }}
+          restore-keys: |
+            upstream-watch-state-
+
       - name: Run upstream watcher
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          python scripts/upstream_watch.py
+          DRY_RUN_ARG=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            DRY_RUN_ARG="--dry-run"
+          fi
+          CYCLE="${{ inputs.cycle || 'weekly' }}"
+          LOOKBACK="${{ inputs.lookback_days || '14' }}"
+          python scripts/upstream_watch.py --cycle "$CYCLE" --lookback-days "$LOOKBACK" $DRY_RUN_ARG
